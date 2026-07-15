@@ -8,7 +8,9 @@ WORKDIR /app
 FROM base AS deps
 COPY package.json package-lock.json* ./
 COPY prisma ./prisma/
-RUN npm install --omit=optional
+# Keep optional deps — lightningcss (Tailwind 4 CSS engine) ships its
+# platform-native binary as an optional dep and the build breaks without it.
+RUN npm install
 
 FROM base AS builder
 COPY --from=deps /app/node_modules ./node_modules
