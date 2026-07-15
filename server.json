@@ -1,0 +1,25 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.Shreyas-Profile/browser-mcp",
+  "description": "Hosted Chrome as an MCP skill. Navigate, click, type, snapshot, encrypted credential storage.",
+  "status": "active",
+  "repository": {
+    "url": "https://github.com/globalion/browser-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://browser.regiq.in/api/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer <apiKey> — get yours at https://browser.regiq.in after sign-in.",
+          "is_required": true,
+          "is_secret": true
+        }
+      ]
+    }
+  ]
+}
