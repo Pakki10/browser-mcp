@@ -1,13 +1,13 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
   "name": "io.github.Shreyas-Profile/browser-mcp",
-  "description": "Hosted Chrome as an MCP skill. Navigate, click, type, snapshot, encrypted credential storage.",
+  "description": "Hosted real Google Chrome as an MCP skill. Per-user persistent storage state so logins survive between sessions AND container rebuilds. Navigate, click, type, snapshot, screenshot. Encrypted credential storage.",
   "status": "active",
   "repository": {
     "url": "https://github.com/globalion/browser-mcp",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.2.0",
   "remotes": [
     {
       "type": "streamable-http",

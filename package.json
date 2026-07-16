@@ -1,8 +1,8 @@
 {
   "name": "browser-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
-  "description": "Hosted headless Chrome as an MCP skill. Your agent gets navigate/click/type/read tools against a real browser. Human-like behaviour, per-user isolation, encrypted credentials so login-gated sites work without exposing passwords to the LLM.",
+  "description": "Hosted real Google Chrome as an MCP skill. navigate/click/type/read/screenshot tools against a real Chrome instance with per-user persistent storage state — logins survive between sessions AND container rebuilds. Encrypted credential storage so login-gated sites work without exposing passwords to the LLM.",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -22,6 +22,7 @@ model User {
   apiKeys     ApiKey[]
   browserSessions BrowserSession[]
   credentials StoredCredential[]
+  browserState UserBrowserState?
 }
 
 model Account {
@@ -94,6 +95,21 @@ model BrowserSession {
 
   @@index([userId])
   @@index([expiresAt])
+}
+
+// --- Per-user Chrome storage state ---
+// One row per user. `state` holds the JSON output of
+// `browserContext.storageState()` — cookies + localStorage + IndexedDB
+// snapshot. Restored on `browser_new_session` so logins persist across
+// sessions AND container rebuilds. Saved on every session close (explicit +
+// idle sweep). Wiping this row logs the user out of every site.
+
+model UserBrowserState {
+  userId    String   @id
+  state     Json
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 // --- Stored credentials ---

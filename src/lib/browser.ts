@@ -1,17 +1,25 @@
-// Playwright session manager.
+// Playwright session manager — now driving real Google Chrome (not
+// Chromium) via `channel: "chrome"`, with per-user persistent storage
+// state so cookies, localStorage, and IndexedDB survive between sessions
+// and container restarts.
 //
-// One shared Chromium instance, N BrowserContexts (one per session), one Page
-// per context. Sessions live in an in-memory Map keyed by sessionId. A
-// mirror row lives in the BrowserSession Prisma model for audit + cleanup.
+// Shape (v0.2):
+//   - One shared real-Chrome instance (`chromium.launch({channel:"chrome"})`).
+//   - One BrowserContext per session, hydrated from a per-user storage
+//     state snapshot stored in Postgres (`UserBrowserState.state`). When a
+//     session closes (explicit close, or idle sweep), we serialise
+//     `context.storageState()` back to the DB so the NEXT session for the
+//     same user resumes with the same cookies.
+//   - One Page per context.
+//   - Sessions still live in an in-memory Map keyed by sessionId + a mirror
+//     row in `BrowserSession` for audit.
 //
-// The sweeper (setInterval) closes contexts that haven't been touched in
-// SESSION_IDLE_MS to free RAM.
-//
-// Stealth: we pass Chromium args and inject a small init script that strips
-// the most obvious "I am a bot" signals (navigator.webdriver, plugins array,
-// languages). This is NOT a full stealth stack (no residential proxies, no
-// TLS fingerprint spoofing) — heavily-guarded sites like Cloudflare Turnstile
-// will still detect. Good enough for most public sites.
+// Stealth: real Chrome + a beefier init script than v0.1 (spoofs webdriver,
+// plugin/mimeType arrays with realistic PluginArray shape, chrome.runtime,
+// WebGL vendor, permissions.query bug fix, iframe.contentWindow.chrome).
+// Handles most public sites and medium-strength anti-bot; heavily-guarded
+// stacks (PerimeterX, Cloudflare Turnstile, DataDome) still detect via IP
+// reputation — no browser-level trick fixes datacenter-IP detection.
 
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { randomUUID } from "node:crypto";
@@ -35,12 +43,20 @@ let sweeperStarted = false;
 async function getBrowser(): Promise<Browser> {
   if (sharedBrowser && sharedBrowser.isConnected()) return sharedBrowser;
   sharedBrowser = await chromium.launch({
+    // Use the real Google Chrome binary installed in the Dockerfile, not
+    // Playwright's bundled Chromium. Chrome carries Google's proprietary
+    // codec bits, its own TLS handshake, and `navigator.userAgentData.brands`
+    // that includes "Google Chrome" — all of which anti-bot stacks look at.
+    channel: "chrome",
     headless: true,
     args: [
       "--no-sandbox",
       "--disable-blink-features=AutomationControlled",
       "--disable-dev-shm-usage",
       "--disable-gpu",
+      "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
+      "--disable-infobars",
+      "--window-size=1920,1080",
     ],
   });
   startSweeper();
@@ -54,6 +70,8 @@ function startSweeper() {
     const now = Date.now();
     for (const [id, sess] of sessions) {
       if (now - sess.lastUsedAt > SESSION_IDLE_MS) {
+        // Persist storage state before closing so the user's cookies survive.
+        persistStorageState(sess).catch(() => undefined);
         sess.context.close().catch(() => undefined);
         sessions.delete(id);
         prisma.browserSession
@@ -64,13 +82,46 @@ function startSweeper() {
   }, SWEEP_INTERVAL_MS).unref();
 }
 
-// Small init script — Playwright injects into every page in the context.
-// Strips the most obvious automation tells.
+// --- Anti-detection init script -----------------------------------------
+// Handles common JS-side fingerprints. Doesn't defeat professional stacks
+// (they also check TLS/JA3 and IP reputation which no init script can touch).
 const STEALTH_INIT = `
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-window.chrome = { runtime: {} };
+
+// Realistic plugin & mimeType arrays with PluginArray-shaped prototype
+const fakePlugin = (name, filename) => ({
+  name, filename, description: '', length: 1,
+  item: () => null, namedItem: () => null,
+});
+Object.defineProperty(navigator, 'plugins', {
+  get: () => {
+    const arr = [
+      fakePlugin('PDF Viewer', 'internal-pdf-viewer'),
+      fakePlugin('Chrome PDF Viewer', 'internal-pdf-viewer'),
+      fakePlugin('Chromium PDF Viewer', 'internal-pdf-viewer'),
+      fakePlugin('Microsoft Edge PDF Viewer', 'internal-pdf-viewer'),
+      fakePlugin('WebKit built-in PDF', 'internal-pdf-viewer'),
+    ];
+    try { Object.setPrototypeOf(arr, window.PluginArray?.prototype ?? Array.prototype); } catch (e) {}
+    return arr;
+  },
+});
+Object.defineProperty(navigator, 'mimeTypes', {
+  get: () => [{ type: 'application/pdf', suffixes: 'pdf' }],
+});
+Object.defineProperty(navigator, 'languages', { get: () => ['en-GB', 'en-US', 'en'] });
+Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+
+// window.chrome — realistic surface (empty runtime{} is a giveaway)
+window.chrome = {
+  runtime: { onConnect: undefined, onMessage: undefined, connect: () => ({}), sendMessage: () => ({}) },
+  app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' } },
+  csi: () => ({}),
+  loadTimes: () => ({}),
+};
+
+// permissions.query — classic "notifications === denied when hidden" bug fix
 const originalQuery = window.navigator.permissions?.query;
 if (originalQuery) {
   window.navigator.permissions.query = (parameters) =>
@@ -78,18 +129,55 @@ if (originalQuery) {
       ? Promise.resolve({ state: Notification.permission })
       : originalQuery(parameters);
 }
+
+// WebGL vendor/renderer — spoof to look like an integrated Intel GPU
+try {
+  const getParameter = WebGLRenderingContext.prototype.getParameter;
+  WebGLRenderingContext.prototype.getParameter = function (parameter) {
+    if (parameter === 37445) return 'Intel Inc.';
+    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+    return getParameter.call(this, parameter);
+  };
+} catch (e) {}
 `;
+
+/**
+ * Save the session's current storage state back to Postgres so the next
+ * session for the same user resumes with the same cookies + localStorage.
+ * Called before every context close (explicit + sweeper).
+ */
+async function persistStorageState(sess: Session): Promise<void> {
+  try {
+    const state = await sess.context.storageState();
+    await prisma.userBrowserState.upsert({
+      where: { userId: sess.userId },
+      create: { userId: sess.userId, state: state as unknown as object },
+      update: { state: state as unknown as object },
+    });
+  } catch (err) {
+    console.warn(`[browser] persistStorageState failed for user ${sess.userId}:`, err);
+  }
+}
 
 export async function newSession(userId: string): Promise<string> {
   const browser = await getBrowser();
+
+  // Restore prior storage state if any — this is what makes logins stick
+  // across sessions and container restarts.
+  const savedState = await prisma.userBrowserState
+    .findUnique({ where: { userId } })
+    .catch(() => null);
+
   const context = await browser.newContext({
     viewport: { width: 1280, height: 720 },
     userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-    locale: "en-US",
-    timezoneId: "America/New_York",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    locale: "en-GB",
+    timezoneId: "Europe/London",
     deviceScaleFactor: 1,
     hasTouch: false,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ...(savedState ? { storageState: savedState.state as any } : {}),
   });
   await context.addInitScript(STEALTH_INIT);
   const page = await context.newPage();
@@ -128,6 +216,7 @@ function requireSession(sessionId: string, userId: string): Session {
 export async function closeSession(sessionId: string, userId: string): Promise<void> {
   const s = sessions.get(sessionId);
   if (!s || s.userId !== userId) return;
+  await persistStorageState(s);
   await s.context.close().catch(() => undefined);
   sessions.delete(sessionId);
   await prisma.browserSession
@@ -164,9 +253,6 @@ export async function snapshot(sessionId: string, userId: string): Promise<unkno
 }
 
 async function findByUid(page: Page, uid: string) {
-  // Simple re-walk of the a11y tree to convert a uid path into a Locator.
-  // Not fast, but robust — we don't cache anything so page mutations between
-  // snapshot and click don't break.
   const tree = await page.accessibility.snapshot({ interestingOnly: true });
   const path = uid.split(".").map(Number);
   let node: unknown = tree;
@@ -178,7 +264,6 @@ async function findByUid(page: Page, uid: string) {
   }
   if (!node) return null;
   const n = node as { role?: string; name?: string };
-  // Use Playwright's getByRole locator — matches role + accessible name.
   return page.getByRole(n.role as never, { name: n.name ?? undefined }).first();
 }
 
