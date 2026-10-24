@@ -14,7 +14,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: admin
-      POSTGRES_PASSWORD: admin
+      POSTGRES_PASSWORD: 925bce0148ea12f82037dc2a65a69e5ca54f8dae4185b08d
       POSTGRES_DB: browser_mcp
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -32,7 +32,7 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://admin:admin@db:5432/browser_mcp
+      DATABASE_URL: postgresql://admin:925bce0148ea12f82037dc2a65a69e5ca54f8dae4185b08d@db:5432/browser_mcp
     ports:
       - "3013:3000"
     depends_on:

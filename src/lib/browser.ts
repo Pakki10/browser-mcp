@@ -159,7 +159,22 @@ async function persistStorageState(sess: Session): Promise<void> {
   }
 }
 
+const MAX_CONCURRENT_SESSIONS_PER_USER = 5;
+
 export async function newSession(userId: string): Promise<string> {
+  // Hard cap on concurrent sessions per user. Prevents a runaway agent from
+  // spinning up dozens of headless Chromes and blowing out the shared box's
+  // RAM. Count only sessions that haven't been closed yet.
+  const active = await prisma.browserSession.count({
+    where: { userId, closedAt: null, expiresAt: { gt: new Date() } },
+  });
+  if (active >= MAX_CONCURRENT_SESSIONS_PER_USER) {
+    throw new Error(
+      `You already have ${active} active browser sessions (limit ${MAX_CONCURRENT_SESSIONS_PER_USER}). ` +
+        `Close one via browser_close_session before opening another.`,
+    );
+  }
+
   const browser = await getBrowser();
 
   // Restore prior storage state if any — this is what makes logins stick
