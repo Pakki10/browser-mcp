@@ -6,7 +6,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/globalion/browser-mcp"
+    "url": "https://github.com/Pakki10/browser-mcp"
   },
   "scripts": {
     "dev": "next dev",
