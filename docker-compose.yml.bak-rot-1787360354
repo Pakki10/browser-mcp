@@ -1,0 +1,46 @@
+# browser-mcp deployment stack.
+#
+# Playwright + Chromium live INSIDE the web container. That container ends up
+# large (~2 GB) because of the Chromium binary — Hetzner box has room.
+# Sessions are in-memory (Map<sessionId, Page>). If the container restarts,
+# users have to call browser_new_session again — this is fine for MVP.
+#
+# Container names prefixed with `browser-mcp-` per Globalion recipe.
+
+services:
+  db:
+    container_name: browser-mcp-db
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: browser_mcp
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d browser_mcp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  web:
+    container_name: browser-mcp-web
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://admin:admin@db:5432/browser_mcp
+    ports:
+      - "3013:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Chromium needs more RAM than a normal Next.js server. Each active
+    # browser context uses ~150-300 MB.
+    mem_limit: 4g
+
+volumes:
+  pgdata:
